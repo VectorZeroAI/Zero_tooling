@@ -115,7 +115,61 @@ class ZeroSearch:
 
     # report() and _get_ai_summary() remain unchanged below
     def report(self) -> str:
-        # ... (unchanged code) ...
+        """Generate detailed report from all gathered texts"""
+        # Load all results
+        if not os.path.exists(self.results_file) or os.path.getsize(self.results_file) == 0:
+            return "No results available for reporting"
+
+        with open(self.results_file, 'r') as f:
+            results = json.load(f)
+
+        # Concatenate all text
+        full_text = "\n\n".join([f"Source: {res['url']}\n{res['text']}" for res in results])
+
+        # Prepare chunking parameters
+        MAX_TOKENS = 100000  # Conservative token limit
+        CHUNK_SIZE = int(MAX_TOKENS * 2.5)  # Approximate character count
+
+        # Process in chunks if needed
+        if len(full_text) > CHUNK_SIZE:
+            chunks = [full_text[i:i+CHUNK_SIZE] for i in range(0, len(full_text), CHUNK_SIZE)]
+            summaries = []
+
+            for chunk in chunks:
+                response = self._get_ai_summary(chunk)
+                summaries.append(response)
+
+            combined_summary = "\n\n".join(summaries)
+            final_report = self._get_ai_summary(combined_summary)
+        else:
+            final_report = self._get_ai_summary(full_text)
+
+        # Save and return report
+        with open(self.report_file, 'w') as f:
+            f.write(final_report)
+
+        return final_report
 
     def _get_ai_summary(self, text: str) -> str:
-        # ... (unchanged code) ...
+        """Helper function to get AI summary for text chunks"""
+        prompt = (
+            "You are a web researcher AI. Analyze the following text and create a detailed report "
+            "capturing all important themes, patterns, and data points. Include specific facts, "
+            "statistics, and insights. Organize findings logically:\n\n"
+            f"{text}"
+        )
+
+        response = requests.post(
+            url="https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.openrouter_api_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.3
+            }
+        )
+
+        return response.json()['choices'][0]['message']['content'].strip()
