@@ -1,3 +1,4 @@
+from config import BRAVE_API_KEY, OPENROUTER_API_KEY
 import requests
 from bs4 import BeautifulSoup
 import json
@@ -6,9 +7,9 @@ import time
 from typing import List, Dict
 
 class ZeroSearch:
-    def __init__(self, brave_api_key: str, openrouter_api_key: str):
-        self.brave_api_key = brave_api_key
-        self.openrouter_api_key = openrouter_api_key
+    def __init__(self):
+        self.brave_key = BRAVE_API_KEY
+        self.openrouter_key = OPENROUTER_API_KEY
         self.model = "tngtech/deepseek-r1t2-chimera:free"
         self.queries_file = "querries.json"
         self.results_file = "results.json"
