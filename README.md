@@ -1,4 +1,4 @@
-# Zero_tooling
+# Zero tooling
 A Public Repo, for userfull Tools, as my commitment to this Community. 
 
 The ZeroSearch uses the Brave API, If Not specified what API it uses in the Name.
