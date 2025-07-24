@@ -1,3 +1,3 @@
-BRAVE_API_KEY = "Input your API key"
 OPENROUTER_API_KEY = "Input your API key"
-SERPER_API_KEY = "Input your API key"
+GOOGLE_API_KEY = "Input your API key"
+GOOGLE_CSE_ID = "Input your CSE ID"
