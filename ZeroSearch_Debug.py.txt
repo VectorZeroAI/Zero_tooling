@@ -1,0 +1,549 @@
+import sys
+import os
+import time
+import json
+import requests
+import logging
+from bs4 import BeautifulSoup
+from typing import List, Dict
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox
+import threading
+import datetime
+import traceback
+
+# Add current directory to path
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from config import GOOGLE_API_KEY, GOOGLE_CSE_ID, OPENROUTER_API_KEY
+
+# Configure logging
+LOG_FILE = "logs.json"
+
+class Logger:
+    def __init__(self, log_file=LOG_FILE):
+        self.log_file = log_file
+        if not os.path.exists(self.log_file):
+            with open(self.log_file, 'w') as f:
+                json.dump([], f)
+    
+    def log(self, level, function, message, details=None):
+        """Add a log entry to the logs.json file"""
+        entry = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "level": level,
+            "function": function,
+            "message": message,
+            "details": details
+        }
+        
+        try:
+            # Read existing logs
+            if os.path.exists(self.log_file) and os.path.getsize(self.log_file) > 0:
+                with open(self.log_file, 'r') as f:
+                    logs = json.load(f)
+            else:
+                logs = []
+            
+            # Add new entry
+            logs.append(entry)
+            
+            # Save updated logs
+            with open(self.log_file, 'w') as f:
+                json.dump(logs, f, indent=2)
+        except Exception as e:
+            print(f"Error saving log: {str(e)}")
+
+class ZeroSearch:
+    def __init__(self):
+        self.logger = Logger()
+        self.logger.log("INFO", "__init__", "Initializing ZeroSearch")
+        
+        # Google Custom Search credentials
+        self.google_api_key = GOOGLE_API_KEY
+        self.google_cse_id = GOOGLE_CSE_ID
+        self.openrouter_api_key = OPENROUTER_API_KEY
+        self.model = "tngtech/deepseek-r1t2-chimera:free"
+        self.queries_file = "querries.json"
+        self.results_file = "results.json"
+        self.report_file = "report.json"
+
+        # Initialize storage files
+        for file in [self.queries_file, self.results_file, self.report_file]:
+            if not os.path.exists(file):
+                try:
+                    with open(file, 'w') as f:
+                        if file == self.results_file:
+                            json.dump([], f)
+                        else:
+                            f.write('')
+                    self.logger.log("INFO", "__init__", f"Created file: {file}")
+                except Exception as e:
+                    self.logger.log("ERROR", "__init__", f"Failed to create {file}", str(e))
+
+    def get_querries(self, theme: str) -> List[str]:
+        """Generate 10 deep research queries for a given theme"""
+        self.logger.log("INFO", "get_querries", "Starting query generation", {"theme": theme})
+        
+        prompt = f"Compile 10 search queries for comprehensive web research of this theme: {theme}. Answer ONLY with the queries."
+
+        try:
+            response = requests.post(
+                url="https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.openrouter_api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.7
+                },
+                timeout=30
+            )
+            response.raise_for_status()
+            
+            # Extract and clean queries
+            raw_queries = response.json()['choices'][0]['message']['content'].strip()
+            queries = [q.strip() for q in raw_queries.split('\n') if q.strip()]
+            
+            self.logger.log("INFO", "get_querries", "Successfully generated queries", 
+                           {"count": len(queries), "first_query": queries[0] if queries else None})
+
+        except Exception as e:
+            error_details = f"Error: {str(e)}"
+            if hasattr(e, 'response') and e.response:
+                error_details += f" | Status: {e.response.status_code} | Response: {e.response.text[:200]}"
+            self.logger.log("ERROR", "get_querries", "Failed to generate queries", error_details)
+            raise
+
+        # Save to file
+        try:
+            with open(self.queries_file, 'w') as f:
+                json.dump(queries, f, indent=2)
+            self.logger.log("INFO", "get_querries", f"Saved queries to {self.queries_file}")
+        except Exception as e:
+            self.logger.log("ERROR", "get_querries", "Failed to save queries", str(e))
+
+        return queries
+
+    def search(self, query: str) -> None:
+        """Pull full-text top-10 results via Google Custom Search API + BeautifulSoup"""
+        self.logger.log("INFO", "search", "Starting search", {"query": query})
+        
+        try:
+            # Google Custom Search API call
+            google_params = {
+                "key": self.google_api_key,
+                "cx": self.google_cse_id,
+                "q": query,
+                "num": 10
+            }
+            google_response = requests.get(
+                url="https://www.googleapis.com/customsearch/v1",
+                params=google_params,
+                timeout=20
+            )
+            google_response.raise_for_status()
+            google_data = google_response.json()
+            
+            # Check if items exist in response
+            if 'items' not in google_data:
+                self.logger.log("WARNING", "search", "No results found for query", {"query": query})
+                return
+                
+            results = []
+            organic_results = google_data.get("items", [])
+            success_count = 0
+            error_count = 0
+
+            self.logger.log("INFO", "search", "Received Google response", 
+                          {"status": google_response.status_code, "results_count": len(organic_results)})
+
+            for res in organic_results:
+                url = res.get('link', '')
+                if not url:
+                    continue
+
+                try:
+                    # Fetch and parse webpage
+                    page = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+                    page.raise_for_status()
+                    soup = BeautifulSoup(page.content, 'html.parser')
+
+                    # Extract title
+                    title = res.get('title', '')
+                    if not title and soup.title:
+                        title = soup.title.string
+
+                    # Extract and clean main text
+                    if soup.body:
+                        for element in soup.body.select('script, style, noscript, footer, nav'):
+                            element.decompose()
+                        text = ' '.join(soup.body.get_text().split())
+                    else:
+                        text = ''
+
+                    results.append({
+                        "url": url,
+                        "title": title,
+                        "text": text[:100000]  # Limit text size
+                    })
+                    success_count += 1
+
+                    # Be polite between requests
+                    time.sleep(1)
+
+                except Exception as e:
+                    error_count += 1
+                    self.logger.log("WARNING", "search", f"Error processing URL: {url}", str(e))
+                    continue
+
+            self.logger.log("INFO", "search", "Completed page processing", 
+                          {"success": success_count, "errors": error_count})
+
+        except Exception as e:
+            error_details = f"Error: {str(e)}"
+            if hasattr(e, 'response') and e.response:
+                error_details += f" | Status: {e.response.status_code} | Response: {e.response.text[:200]}"
+            self.logger.log("ERROR", "search", "Search failed", error_details)
+            return
+
+        # Append to existing results
+        try:
+            existing_results = []
+            if os.path.exists(self.results_file) and os.path.getsize(self.results_file) > 0:
+                with open(self.results_file, 'r') as f:
+                    existing_results = json.load(f)
+
+            existing_results.extend(results)
+
+            with open(self.results_file, 'w') as f:
+                json.dump(existing_results, f, indent=2)
+                
+            self.logger.log("INFO", "search", f"Saved {len(results)} results to {self.results_file}",
+                          {"total_results": len(existing_results)})
+        except Exception as e:
+            self.logger.log("ERROR", "search", "Failed to save results", str(e))
+
+    def report(self) -> str:
+        """Generate detailed report from all gathered texts"""
+        self.logger.log("INFO", "report", "Starting report generation")
+        
+        # Load all results
+        if not os.path.exists(self.results_file) or os.path.getsize(self.results_file) == 0:
+            self.logger.log("ERROR", "report", "No results available for reporting")
+            return "No results available for reporting"
+
+        try:
+            with open(self.results_file, 'r') as f:
+                results = json.load(f)
+                
+            self.logger.log("INFO", "report", f"Loaded {len(results)} results for reporting")
+        except Exception as e:
+            self.logger.log("ERROR", "report", "Failed to load results", str(e))
+            return "Failed to load results"
+
+        # Concatenate all text
+        full_text = "\n\n".join([f"Source: {res['url']}\n{res['text']}" for res in results])
+        total_chars = len(full_text)
+        self.logger.log("INFO", "report", "Concatenated text for analysis", 
+                      {"total_chars": total_chars, "result_count": len(results)})
+
+        # Prepare chunking parameters
+        MAX_TOKENS = 100000
+        CHUNK_SIZE = int(MAX_TOKENS * 2.5)
+
+        try:
+            # Process in chunks if needed
+            if total_chars > CHUNK_SIZE:
+                chunks = [full_text[i:i+CHUNK_SIZE] for i in range(0, total_chars, CHUNK_SIZE)]
+                self.logger.log("INFO", "report", "Processing in chunks", 
+                              {"chunk_count": len(chunks), "avg_chars": CHUNK_SIZE})
+                
+                summaries = []
+                for i, chunk in enumerate(chunks):
+                    self.logger.log("INFO", "report", f"Processing chunk {i+1}/{len(chunks)}")
+                    response = self._get_ai_summary(chunk)
+                    summaries.append(response)
+
+                combined_summary = "\n\n".join(summaries)
+                final_report = self._get_ai_summary(combined_summary)
+                self.logger.log("INFO", "report", "Combined chunk summaries")
+            else:
+                final_report = self._get_ai_summary(full_text)
+
+            # Save and return report
+            with open(self.report_file, 'w') as f:
+                f.write(final_report)
+                
+            self.logger.log("INFO", "report", f"Report generated and saved to {self.report_file}",
+                          {"report_length": len(final_report)})
+            return final_report
+
+        except Exception as e:
+            self.logger.log("ERROR", "report", "Report generation failed", str(e))
+            return f"Report generation failed: {str(e)}"
+
+    def _get_ai_summary(self, text: str) -> str:
+        """Helper function to get AI summary for text chunks"""
+        self.logger.log("INFO", "_get_ai_summary", "Requesting AI summary", 
+                      {"text_length": len(text)})
+        
+        prompt = (
+            "You are a web researcher AI. Analyze the following text and create a detailed report "
+            "capturing all important themes, patterns, and data points. Include specific facts, "
+            "statistics, and insights. Organize findings logically:\n\n"
+            f"{text}"
+        )
+
+        try:
+            response = requests.post(
+                url="https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.openrouter_api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3
+                },
+                timeout=60
+            )
+            response.raise_for_status()
+            content = response.json()['choices'][0]['message']['content'].strip()
+            
+            self.logger.log("INFO", "_get_ai_summary", "Received AI summary", 
+                          {"response_length": len(content)})
+            return content
+
+        except Exception as e:
+            error_details = f"Error: {str(e)}"
+            if hasattr(e, 'response') and e.response:
+                error_details += f" | Status: {e.response.status_code} | Response: {e.response.text[:200]}"
+            self.logger.log("ERROR", "_get_ai_summary", "AI summary request failed", error_details)
+            raise
+
+class ZeroSearchGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("ZeroSearch Research Assistant")
+        self.zs = ZeroSearch()
+        self.logger = Logger()
+        
+        self.logger.log("INFO", "GUI", "GUI initialized")
+        
+        # Configure main window
+        self.root.geometry("800x600")
+        self.root.minsize(700, 500)
+        
+        # Create main frame
+        main_frame = ttk.Frame(root, padding=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Theme input section
+        theme_frame = ttk.LabelFrame(main_frame, text="Research Theme", padding=10)
+        theme_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(theme_frame, text="Enter research topic:").pack(side=tk.LEFT, padx=(0, 10))
+        self.theme_entry = ttk.Entry(theme_frame, width=50)
+        self.theme_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+        self.theme_entry.bind("<Return>", lambda e: self.generate_queries())
+        
+        # Action buttons
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        self.generate_btn = ttk.Button(btn_frame, text="1. Generate Queries", 
+                                      command=self.generate_queries)
+        self.generate_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.search_btn = ttk.Button(btn_frame, text="2. Run Searches", 
+                                    command=self.run_searches, state=tk.DISABLED)
+        self.search_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.report_btn = ttk.Button(btn_frame, text="3. Generate Report", 
+                                    command=self.generate_report, state=tk.DISABLED)
+        self.report_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Progress bar
+        self.progress = ttk.Progressbar(btn_frame, mode='determinate')
+        self.progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+        self.progress.pack_forget()  # Hide initially
+        
+        # Output area
+        output_frame = ttk.LabelFrame(main_frame, text="Research Output", padding=10)
+        output_frame.pack(fill=tk.BOTH, expand=True)
+        
+        self.output_area = scrolledtext.ScrolledText(output_frame, wrap=tk.WORD)
+        self.output_area.pack(fill=tk.BOTH, expand=True)
+        self.output_area.configure(state=tk.DISABLED, font=("Arial", 10))
+        
+        # Status bar
+        self.status_var = tk.StringVar(value="Ready")
+        status_bar = ttk.Label(root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # Add view logs button
+        view_logs_btn = ttk.Button(btn_frame, text="View Logs", command=self.view_logs)
+        view_logs_btn.pack(side=tk.RIGHT, padx=5)
+    
+    def log_message(self, message, clear=False):
+        """Add message to output area"""
+        self.output_area.configure(state=tk.NORMAL)
+        if clear:
+            self.output_area.delete(1.0, tk.END)
+        self.output_area.insert(tk.END, message + "\n")
+        self.output_area.configure(state=tk.DISABLED)
+        self.output_area.see(tk.END)
+        self.root.update_idletasks()
+    
+    def update_status(self, message):
+        """Update status bar"""
+        self.status_var.set(message)
+        self.root.update_idletasks()
+    
+    def generate_queries(self):
+        """Generate research queries from theme"""
+        theme = self.theme_entry.get().strip()
+        if not theme:
+            messagebox.showerror("Input Error", "Please enter a research theme")
+            return
+            
+        self.logger.log("INFO", "GUI", "Generating queries", {"theme": theme})
+        
+        # Disable button during operation
+        self.generate_btn.config(state=tk.DISABLED)
+        self.update_status("Generating research queries...")
+        self.log_message(f"Generating queries for theme: {theme}", clear=True)
+        
+        def worker():
+            try:
+                queries = self.zs.get_querries(theme)
+                self.log_message(f"\nGenerated {len(queries)} queries:")
+                for i, q in enumerate(queries, 1):
+                    self.log_message(f"{i}. {q}")
+                
+                # Enable next steps
+                self.search_btn.config(state=tk.NORMAL)
+                self.report_btn.config(state=tk.DISABLED)
+                messagebox.showinfo("Success", "Queries generated successfully!")
+                self.logger.log("INFO", "GUI", "Queries generated successfully")
+            except Exception as e:
+                self.log_message(f"\nERROR: {str(e)}")
+                messagebox.showerror("Error", f"Query generation failed: {str(e)}")
+                self.logger.log("ERROR", "GUI", "Query generation failed", str(e))
+            finally:
+                self.generate_btn.config(state=tk.NORMAL)
+                self.update_status("Ready")
+        
+        threading.Thread(target=worker, daemon=True).start()
+    
+    def run_searches(self):
+        """Execute all searches from generated queries"""
+        self.logger.log("INFO", "GUI", "Starting searches")
+        
+        # Show progress bar
+        self.progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+        self.search_btn.config(state=tk.DISABLED)
+        self.update_status("Running web searches...")
+        self.log_message("\nStarting web searches...")
+        
+        def worker():
+            try:
+                with open(self.zs.queries_file) as f:
+                    queries = json.load(f)
+                
+                total = len(queries)
+                self.logger.log("INFO", "GUI", "Running searches", {"query_count": total})
+                
+                for i, query in enumerate(queries, 1):
+                    self.log_message(f"\nSearch {i}/{total}: {query}")
+                    self.update_status(f"Searching: {query[:50]}...")
+                    self.zs.search(query)
+                    
+                    # Update progress
+                    progress = int((i / total) * 100)
+                    self.progress['value'] = progress
+                    self.root.update_idletasks()
+                
+                self.log_message("\nAll searches completed!")
+                self.report_btn.config(state=tk.NORMAL)
+                messagebox.showinfo("Success", "All web searches completed!")
+                self.logger.log("INFO", "GUI", "All searches completed")
+            except Exception as e:
+                self.log_message(f"\nERROR: {str(e)}")
+                messagebox.showerror("Error", f"Search failed: {str(e)}")
+                self.logger.log("ERROR", "GUI", "Search failed", str(e))
+            finally:
+                self.search_btn.config(state=tk.NORMAL)
+                self.progress.pack_forget()
+                self.update_status("Ready")
+        
+        threading.Thread(target=worker, daemon=True).start()
+    
+    def generate_report(self):
+        """Generate final research report"""
+        self.logger.log("INFO", "GUI", "Generating report")
+        
+        self.report_btn.config(state=tk.DISABLED)
+        self.update_status("Generating research report...")
+        self.log_message("\nGenerating final research report...")
+        
+        def worker():
+            try:
+                report = self.zs.report()
+                self.log_message("\n" + "="*50)
+                self.log_message("FINAL RESEARCH REPORT")
+                self.log_message("="*50 + "\n")
+                self.log_message(report)
+                self.log_message("\n" + "="*50)
+                messagebox.showinfo("Success", "Research report generated!")
+                self.logger.log("INFO", "GUI", "Report generated successfully")
+            except Exception as e:
+                self.log_message(f"\nERROR: {str(e)}")
+                messagebox.showerror("Error", f"Report generation failed: {str(e)}")
+                self.logger.log("ERROR", "GUI", "Report generation failed", str(e))
+            finally:
+                self.report_btn.config(state=tk.NORMAL)
+                self.update_status("Ready")
+        
+        threading.Thread(target=worker, daemon=True).start()
+    
+    def view_logs(self):
+        """Display logs in a new window"""
+        try:
+            if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 0:
+                with open(LOG_FILE, 'r') as f:
+                    logs = json.load(f)
+                
+                log_window = tk.Toplevel(self.root)
+                log_window.title("System Logs")
+                log_window.geometry("1000x600")
+                
+                # Create text area with scrollbar
+                frame = ttk.Frame(log_window)
+                frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+                
+                text_area = scrolledtext.ScrolledText(frame, wrap=tk.WORD)
+                text_area.pack(fill=tk.BOTH, expand=True)
+                
+                # Add logs to text area
+                for log in logs[-200:]:  # Show last 200 entries
+                    text_area.insert(tk.END, f"[{log['timestamp']}] {log['level']} - {log['function']}: {log['message']}\n")
+                    if log['details']:
+                        text_area.insert(tk.END, f"    Details: {log['details']}\n")
+                    text_area.insert(tk.END, "-" * 80 + "\n")
+                
+                text_area.configure(state=tk.DISABLED)
+            else:
+                messagebox.showinfo("Logs", "No logs available yet")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load logs: {str(e)}")
+            self.logger.log("ERROR", "GUI", "Failed to view logs", str(e))
+
+# Add this at the bottom of your file to run the GUI
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = ZeroSearchGUI(root)
+    root.mainloop()
