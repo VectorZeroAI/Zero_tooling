@@ -1,0 +1,52 @@
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="ZeroSearch: Comprehensive Web Research Tool")
+    subparsers = parser.add_subparsers(dest='command', help='Available commands')
+    
+    # Generate queries command
+    parser_generate = subparsers.add_parser('generate', help='Generate research queries')
+    parser_generate.add_argument('theme', type=str, help='Research theme/topic')
+    
+    # Search command
+    parser_search = subparsers.add_parser('search', help='Execute web searches')
+    parser_search.add_argument('--query', type=str, help='Specific query to search (uses all queries if omitted)')
+    
+    # Report command
+    parser_report = subparsers.add_parser('report', help='Generate research report')
+    
+    args = parser.parse_args()
+    zs = ZeroSearch()
+    
+    if args.command == 'generate':
+        queries = zs.get_querries(args.theme)
+        print(f"Generated {len(queries)} queries:")
+        for i, q in enumerate(queries, 1):
+            print(f"{i}. {q}")
+            
+    elif args.command == 'search":
+        if args.query:
+            print(f"Searching for: {args.query}")
+            zs.search(args.query)
+        else:
+            if not os.path.exists(zs.queries_file) or os.path.getsize(zs.queries_file) == 0:
+                print("No queries found. Generate queries first.")
+                exit()
+            with open(zs.queries_file) as f:
+                queries = json.load(f)
+            print(f"Executing {len(queries)} searches...")
+            for query in queries:
+                print(f"- Searching: {query}")
+                zs.search(query)
+        print("All searches completed!")
+        
+    elif args.command == 'report':
+        print("Generating research report...")
+        report = zs.report()
+        print("\n===== FINAL REPORT =====")
+        print(report)
+        print(f"\nReport saved to {zs.report_file}")
+        
+    else:
+        parser.print_help()
