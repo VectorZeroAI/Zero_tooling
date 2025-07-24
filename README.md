@@ -1,6 +1,10 @@
 # Zero tooling
 A Public Repo, for userfull Tools, as my commitment to this Community. 
 
+NOTISE:IGNORE ALL THE VERSIONS OF "ZeroSearch" EXEPT "ZeroSearch_Debug"!!!
+
+PLEASE EXPLAIN HOW DO I DELETE FILES.
+
 ZeroSearch is using OpenRouter LLM and Google 
 Custom Search to provide you with direct 
 reports to a theme.
